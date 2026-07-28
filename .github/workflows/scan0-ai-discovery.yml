@@ -1,0 +1,63 @@
+name: AI Discovery
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * *"
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AGENTSCAN_IMAGE: ghcr.io/internalscan0/agentscan:1.0.0-alpha
+  IACSCAN_IMAGE: ghcr.io/internalscan0/iacscan:1.0.0-alpha
+
+jobs:
+  content-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Log in to GHCR (pull scanner image)
+        run: echo "${{ secrets.GHCR_PULL_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: agentscan — content (SBOM + MCP + taint)
+        run: |
+          mkdir -p out && chmod 777 out
+          docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" -w /work \
+            "$AGENTSCAN_IMAGE" /work --framework=auto \
+              --repo="${{ github.repository }}" --commit="${{ github.sha }}" \
+              --out=/work/out/ai-content.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai-content
+          path: out/*.json
+          retention-days: 7
+
+  upload:
+    needs: [content-scan]
+    if: >-
+      ${{ !cancelled() && (needs.content-scan.result == 'success') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: bundle
+      - name: Push metadata to Scan0
+        env:
+          SCAN0_API_KEY: ${{ secrets.SCAN0_API_KEY }}
+        run: |
+          find bundle -name '*.json' -print0 | while IFS= read -r -d '' f; do
+            echo "uploading $f"
+            curl -sf -X POST "${{ vars.AI_DISCOVERY_INGEST_URL }}/api/scan-results" \
+              -H "Authorization: Bearer ${SCAN0_API_KEY}" \
+              -H "X-Account-ID: 4cc007c8-9358-4583-b7cc-41832f82935f" \
+              -H "Content-Type: application/json" \
+              -H "X-Repo: ${{ github.repository }}" \
+              -H "X-Commit: ${{ github.sha }}" \
+              --data-binary @"$f"
+          done
