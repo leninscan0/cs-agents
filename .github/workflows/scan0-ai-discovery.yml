@@ -1,0 +1,46 @@
+name: AI Discovery
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * *"
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AIDEFENDO_CISCAN_IMAGE: "ghcr.io/internalscan0/aidefendo-ciscan:latest"
+  AIDEFENDO_UPLOAD_URL: ${{ vars.AIDEFENDO_UPLOAD_URL }}
+  AIDEFENDO_INGEST_TOKEN: ${{ secrets.AIDEFENDO_INGEST_TOKEN }}
+
+jobs:
+  ai-discovery:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Log in to the scanner registry
+        run: |
+          if [ -z "$AIDEFENDO_UPLOAD_URL" ] || [ -z "$AIDEFENDO_INGEST_TOKEN" ]; then echo "no upload target or credential: pulling anonymously"; exit 0; fi
+          resp=$(curl -sf -X POST "${AIDEFENDO_UPLOAD_URL%/}/api/registry-token" -H "Authorization: Bearer ${AIDEFENDO_INGEST_TOKEN}") || { echo "no registry token: pulling anonymously"; exit 0; }
+          token=$(echo "$resp" | jq -r .token)
+          echo "::add-mask::$token"
+          echo "$token" | docker login "$(echo "$resp" | jq -r .registry)" -u "$(echo "$resp" | jq -r .username)" --password-stdin
+
+      - name: aidefendo-ciscan (code, Terraform, GitOps; uploads metadata only)
+        run: |
+          mkdir -p out && chmod 777 out
+          docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" -w /work \
+            -e GITHUB_REPOSITORY -e GITHUB_SHA -e AIDEFENDO_INGEST_TOKEN -e AIDEFENDO_UPLOAD_URL \
+            -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN -e AWS_REGION -e AWS_DEFAULT_REGION \
+            "$AIDEFENDO_CISCAN_IMAGE" auto --out-dir=out --mode=drift --allow-partial
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ai-discovery
+          path: out/*.json
+          retention-days: 7
